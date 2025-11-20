@@ -1,29 +1,26 @@
 // dpi_check.cpp
-// g++ -std=c++17 dpi_check.cpp -lcurl -pthread -O2 -o dpi_check
+// build: g++ -std=c++23 dpi_check.cpp -lcurl -pthread -O2 -o dpi_check
 
 #include <curl/curl.h>
 #include <chrono>
-#include <iomanip>
 #include <iostream>
 #include <mutex>
-#include <sstream>
 #include <string>
+#include <format>
 #include <thread>
 #include <vector>
 #include <atomic>
-#include <regex>
-#include <nlohmann/json.hpp>
 
 using namespace std::chrono;
 
-static const size_t OK_THRESHOLD_BYTES = 64 * 1024; // 64 KB
+static const size_t OK_THRESHOLD_BYTES = 64 * 1024;
 static long TIMEOUT_MS = 5000;
 
 struct Test {
     std::string id;
     std::string provider;
     std::string url;
-    int times;
+    int times{};
 };
 
 struct Result {
@@ -39,98 +36,73 @@ struct Result {
 
 std::mutex log_mtx;
 
-static void safe_localtime(const time_t* t, std::tm* out) {
-#if defined(_WIN32)
-    localtime_s(out, t);   // Windows version: note argument order
-#else
-    localtime_r(t, out);   // POSIX version
-#endif
-}
-
-
-void log_inline(const std::string& s) {
+void log_write(const std::string& s, bool newline) {
     std::lock_guard<std::mutex> lk(log_mtx);
-    std::cout << "\r" << s << "\033[K" << std::flush;
+    std::cout << "\r" << s << "\033[K";
+    if (newline) {
+        std::cout << std::endl;
+    } else {
+        std::cout << std::flush;
+    }
 }
 
-void log_line(const std::string& s) {
-    std::lock_guard<std::mutex> lk(log_mtx);
-    std::cout << "\r" << s << "\033[K" << std::endl;
-}
+void log_line(const std::string& s) { log_write(s, true); }
+void log_inline(const std::string& s) { log_write(s, false); }
 
+std::string currentTimestamp() {
+    using namespace std::chrono;
+
+    const auto now = system_clock::now();
+    const auto ms  = duration_cast<milliseconds>(now.time_since_epoch()) % 1s;
+
+    return std::format(
+        "[{:%H:%M:%S}.{:03}]",
+        floor<seconds>(now),
+        ms.count()
+    );
+}
 
 
 
 void log_start(const std::string& id, const std::string& text) {
-    auto now = system_clock::now();
-    auto t = system_clock::to_time_t(now);
-    auto ms = duration_cast<milliseconds>(now.time_since_epoch()).count() % 1000;
-    std::tm tm{};
-    safe_localtime(&t, &tm);
-
-    std::ostringstream oss;
-    oss << "[" << std::put_time(&tm, "%H:%M:%S") << "." 
-        << std::setw(3) << std::setfill('0') << ms << "] "
-        << id << " - " << text;
-
-    log_inline(oss.str());     // <── не добавляем новой строки
+    std::string line = std::format("{} {} - {}", currentTimestamp(), id, text);
+    log_inline(line);
 }
 
-
-void log_msg(const std::string &prefix, const std::string &msg) {
+void log_msg(const std::string& prefix, const std::string& msg) {
     std::lock_guard<std::mutex> lk(log_mtx);
-    auto now = system_clock::now();
-    auto t = system_clock::to_time_t(now);
-    auto ms = duration_cast<milliseconds>(now.time_since_epoch()).count() % 1000;
-    std::tm tm{};
-    safe_localtime(&t, &tm);
-    std::ostringstream oss;
-    oss << "[" << std::put_time(&tm, "%H:%M:%S") << "." << std::setw(3) << std::setfill('0') << ms << "] ";
-    if (!prefix.empty()) oss << prefix << " - ";
-    oss << msg << "\n";
-    std::cout << oss.str() << std::flush;
+    std::string timestamp = currentTimestamp();
+    std::string output;
+
+    if (!prefix.empty()) {
+        output = std::format("{} {} - {}\n", timestamp, prefix, msg);
+    } else {
+        output = std::format("{} {}\n", timestamp, msg);
+    }
+
+    std::cout << output << std::flush;
 }
+
 
 void log_result(const Result& res) {
-    auto now = system_clock::now();
-    auto t = system_clock::to_time_t(now);
-    auto ms = duration_cast<milliseconds>(now.time_since_epoch()).count() % 1000;
-    std::tm tm{};
-    safe_localtime(&t, &tm);
-
-    std::ostringstream oss;
-
-    // Время: [HH:MM:SS.mmm]
-    oss << "[" << std::put_time(&tm, "%H:%M:%S") << "." 
-        << std::setw(3) << std::setfill('0') << ms << "] "
-        << std::setfill(' ');
-
-    // Форматируем колонки с фиксированной шириной
-    // ID (15 символов, слева)
-    oss << std::left << std::setw(15) << res.id << " ";
-
-    // HTTP код (4 символа, справа)
-    oss << std::right << std::setw(4) << res.http_code << " ";
-
-    // Bytes (8 символов, справа)
-    oss << std::right << std::setw(8) << res.received.load() << " ";
-
-    // Elapsed ms (10 символов, справа, с 1 знаком после запятой)
-    oss << std::right << std::setw(10) << std::fixed << std::setprecision(1) << res.elapsed_ms << " ms ";
-
-    // Result (20 символов, слева, если длиннее — обрезаем)
+    std::string timestamp = currentTimestamp();
     std::string status = res.status;
     if (status.size() > 20) status = status.substr(0, 17) + "...";
-    oss << std::left << std::setw(17) << status << " ";
 
-    // Detail (оставшееся пространство)
-    oss << res.detail;
+    std::string output = std::format(
+        "{} {:<15} {:>4} {:>8} {:>10.1f} ms {:<17} {}",
+        timestamp,
+        res.id,
+        res.http_code,
+        res.received.load(),
+        res.elapsed_ms,
+        status,
+        res.detail
+    );
 
-    log_line(oss.str());
+    log_line(output);
 }
 
-
-// Callback libcurl для загрузки HTML в std::string
 static size_t curlWriteToString(void* contents, size_t size, size_t nmemb, void* userp) {
     size_t totalSize = size * nmemb;
     std::string* str = static_cast<std::string*>(userp);
@@ -138,83 +110,132 @@ static size_t curlWriteToString(void* contents, size_t size, size_t nmemb, void*
     return totalSize;
 }
 
-// Функция загрузки HTML по URL
-bool fetchHtml(const std::string& url, std::string& html) {
-    CURL* curl = curl_easy_init();
-    if (!curl) return false;
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curlWriteToString);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &html);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0");
-    CURLcode res = curl_easy_perform(curl);
-    curl_easy_cleanup(curl);
-    return res == CURLE_OK;
+bool fetchHtml(const std::string& url, std::string& html) { 
+    CURL* curl = curl_easy_init(); 
+    if (!curl) return false; 
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str()); 
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curlWriteToString); 
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &html); 
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L); 
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0"); 
+    CURLcode res = curl_easy_perform(curl); 
+    curl_easy_cleanup(curl); return res == CURLE_OK; 
 }
 
-// Преобразование JS-массива в JSON (простейшие замены)
-std::string jsArrayToJson(const std::string& js) {
-    std::string json = js;
-    // Добавить кавычки вокруг ключей (ключ: value -> "ключ": value)
-    json = std::regex_replace(json, std::regex(R"((\{|,)\s*([a-zA-Z0-9_]+)\s*:)"), "$1\"$2\":");
-    // Заменить одинарные кавычки на двойные
-    json = std::regex_replace(json, std::regex("'"), "\"");
-    // Убрать лишние запятые перед закрывающими скобками
-    json = std::regex_replace(json, std::regex(",(\\s*[}\\]])"), "$1");
-    return json;
+static inline std::string trim(const std::string& s) {
+    size_t a = s.find_first_not_of(" \t\n\r");
+    size_t b = s.find_last_not_of(" \t\n\r");
+    if (a == std::string::npos) return "";
+    return s.substr(a, b - a + 1);
 }
 
-// Функция загрузки и парсинга TEST_SUITE из HTML
+
+std::string extractTestSuiteArray(const std::string& html) {
+    const std::string marker = "const TEST_SUITE";
+    auto pos = html.find(marker);
+    if (pos == std::string::npos) return {};
+
+    // найти первую '[' после маркера
+    pos = html.find('[', pos);
+    if (pos == std::string::npos) return {};
+
+    size_t depth = 0;
+    size_t start = pos;
+
+    for (size_t i = pos; i < html.size(); ++i) {
+        if (html[i] == '[') depth++;
+        else if (html[i] == ']') {
+            depth--;
+            if (depth == 0) {
+                return html.substr(start, i - start + 1);
+            }
+        }
+    }
+    return {};
+}
+
+bool parseObject(const std::string& objText, Test& t) {
+    auto getString = [&](const std::string& key) -> std::string {
+        std::string pat = key + ":";
+        size_t p = objText.find(pat);
+        if (p == std::string::npos) return "";
+        p = objText.find('"', p);
+        if (p == std::string::npos) return "";
+        size_t q = objText.find('"', p + 1);
+        if (q == std::string::npos) return "";
+        return objText.substr(p + 1, q - (p + 1));
+    };
+
+    auto getInt = [&](const std::string& key) -> int {
+        std::string pat = key + ":";
+        size_t p = objText.find(pat);
+        if (p == std::string::npos) return 0;
+        p += pat.size();
+        while (p < objText.size() && isspace(objText[p])) p++;
+        size_t q = p;
+        while (q < objText.size() && isdigit(objText[q])) q++;
+        return std::stoi(objText.substr(p, q - p));
+    };
+
+    t.id       = getString("id");
+    t.provider = getString("provider");
+    t.url      = getString("url");
+    t.times    = getInt("times");
+
+    return !t.id.empty();
+}
+
+void parseTestSuiteVector(const std::string& arrayText, std::vector<Test>& out) {
+    size_t i = 0;
+    while (i < arrayText.size()) {
+        auto p = arrayText.find('{', i);
+        if (p == std::string::npos) break;
+
+        int depth = 0;
+        size_t start = p;
+        for (size_t j = p; j < arrayText.size(); ++j) {
+            if (arrayText[j] == '{') depth++;
+            else if (arrayText[j] == '}') {
+                depth--;
+                if (depth == 0) {
+                    std::string obj = arrayText.substr(start, j - start + 1);
+                    Test t;
+                    if (parseObject(obj, t)) {
+                        out.push_back(std::move(t));
+                    }
+                    i = j + 1;
+                    break;
+                }
+            }
+        }
+        i++;
+    }
+}
+
 void loadTestSuiteFromUrl(std::vector<Test>& tests, const std::string& url) {
     std::string html;
-    if (!fetchHtml(url, html)) {
-        // Не удалось скачать — не менять tests
-        return;
-    }
+    if (!fetchHtml(url, html)) return;
 
-    std::regex re(R"(const\s+TEST_SUITE\s*=\s*(\[[\s\S]*?\]);)");
-    std::smatch match;
-    if (!std::regex_search(html, match, re)) {
-        // Не нашли TEST_SUITE — не менять tests
-        return;
-    }
+    std::string arr = extractTestSuiteArray(html);
+    if (arr.empty()) return;
 
-    std::string jsArray = match[1];
-    std::string jsonText = jsArrayToJson(jsArray);
-
-    try {
-        auto j = nlohmann::json::parse(jsonText);
-        std::vector<Test> tmpTests;
-        for (const auto& item : j) {
-            Test t;
-            t.id = item.at("id").get<std::string>();
-            t.provider = item.at("provider").get<std::string>();
-            t.url = item.at("url").get<std::string>();
-            t.times = item.at("times").get<int>();
-            tmpTests.push_back(std::move(t));
-        }
-        tests = std::move(tmpTests); // Только после успешного парсинга заменяем основной вектор
-    } catch (...) {
-        // Ошибка парсинга — не менять tests
-        return;
-    }
+    tests.clear();
+    parseTestSuiteVector(arr, tests);
 }
 
-// libcurl write callback: receives chunks; just count bytes.
+
 static size_t write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
     size_t real = size * nmemb;
     Result* res = static_cast<Result*>(userdata);
     res->received += real;
-    // Always accept data (return real). We will abort via xferinfo when threshold reached.
     return real;
 }
 
-// xferinfo callback: called often; we can return non-zero to abort.
 static int xferinfo_cb(void* p, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow) {
     Result* res = static_cast<Result*>(p);
     if (res->received >= OK_THRESHOLD_BYTES) {
         res->aborted_by_threshold = true;
-        return 1; // abort transfer
+        return 1;
     }
     return 0;
 }
@@ -232,7 +253,6 @@ void worker(const Test& t, int idx, long timeout_ms) {
         return;
     }
 
-    // set URL (add unique query param to avoid caching if desired)
     std::string url = t.url;
     if (url.find('?') == std::string::npos) {
         url += "?t=" + std::to_string((unsigned long)std::hash<std::string>{}(res.id + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())));
@@ -241,27 +261,25 @@ void worker(const Test& t, int idx, long timeout_ms) {
     }
 
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L); // mirror JS redirect: "manual"
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, xferinfo_cb);
     curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &res);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &res);
     curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms); // overall timeout
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms);
     curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip, br");
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36");
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, timeout_ms / 1000);
 
-    // perform
     log_start(res.id, "Starting request -> " + url);
     CURLcode rc = curl_easy_perform(curl);
 
     auto t_end = steady_clock::now();
     res.elapsed_ms = duration_cast<duration<double, std::milli>>(t_end - t_start).count();
 
-    // get HTTP response code if available
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &res.http_code);
 
     switch (rc) {
@@ -305,8 +323,6 @@ void worker(const Test& t, int idx, long timeout_ms) {
         break;
 }
 
-
-// log summary
 {
     std::ostringstream summary;
     summary << "HTTP " << res.http_code
@@ -322,45 +338,7 @@ void worker(const Test& t, int idx, long timeout_ms) {
 }
 
 int main(int argc, char** argv) {
-    // Simple test-suite: можно расширять / читать из файла / CLI
-std::vector<Test> tests = {
-    {"US.CF-01", "Cloudflare", "https://cdn.cookielaw.org/scripttemplates/202501.2.0/otBannerSdk.js", 1},
-    {"US.CF-02", "Cloudflare", "https://genshin.jmp.blue/characters/all#", 1},
-    {"US.CF-03", "Cloudflare", "https://api.frankfurter.dev/v1/2000-01-01..2002-12-31", 1},
-
-    {"US.DO-01", "DigitalOcean", "https://genderize.io/", 2},
-
-    {"DE.HE-01", "Hetzner", "https://j.dejure.org/jcg/doctrine/doctrine_banner.webp", 1},
-    {"FI.HE-01", "Hetzner", "https://tcp1620-01.dubybot.live/1MB.bin", 1},
-    {"FI.HE-02", "Hetzner", "https://tcp1620-02.dubybot.live/1MB.bin", 1},
-    {"FI.HE-03", "Hetzner", "https://tcp1620-05.dubybot.live/1MB.bin", 1},
-    {"FI.HE-04", "Hetzner", "https://tcp1620-06.dubybot.live/1MB.bin", 1},
-
-    {"FR.OVH-01", "OVH", "https://eu.api.ovh.com/console/rapidoc-min.js", 1},
-    {"FR.OVH-02", "OVH", "https://ovh.sfx.ovh/10M.bin", 1},
-
-    {"SE.OR-01", "Oracle", "https://oracle.sfx.ovh/10M.bin", 1},
-
-    {"DE.AWS-01", "AWS", "https://tms.delta.com/delta/dl_anderson/Bootstrap.js", 1},
-    {"US.AWS-01", "AWS", "https://d1rbsgppyrdqq4.cloudfront.net/s3fs-public/c7/Konyukhov_asu_0010N_23739.pdf", 1},
-
-    {"US.GC-01", "Google Cloud", "https://api.usercentrics.eu/gvl/v3/en.json", 1},
-
-    {"US.FST-01", "Fastly", "https://openoffice.apache.org/images/blog/rejected.png", 1},
-    {"US.FST-02", "Fastly", "https://www.juniper.net/etc.clientlibs/juniper/clientlibs/clientlib-site/resources/fonts/lato/Lato-Regular.woff2", 1},
-
-    {"PL.AKM-01", "Akamai", "https://www.lg.com/lg5-common-gp/library/jquery.min.js", 1},
-    {"PL.AKM-02", "Akamai", "https://media-assets.stryker.com/is/image/stryker/gateway_1?$max_width_1410$", 1},
-
-    {"US.CDN77-01", "CDN77", "https://www.winkgo.com/wp-content/themes/mts_sociallyviral/fonts/fontawesome-webfont.woff2", 1},
-
-    {"DE.CNTB-01", "Contabo", "https://cloudlets.io/wp-content/themes/Avada/includes/lib/assets/fonts/fontawesome/webfonts/fa-solid-900.woff2", 1},
-
-    {"FR.SW-01", "Scaleway", "https://renklisigorta.com.tr/teklif-al", 1},
-
-    {"US.CNST-01", "Constant", "https://cdn.xuansiwei.com/common/lib/font-awesome/4.7.0/fontawesome-webfont.woff2?v=4.7.0", 1}
-};
-
+std::vector<Test> tests = {};
 
 if (argc > 1) {
         try {
@@ -369,11 +347,7 @@ if (argc > 1) {
     }
 
     curl_global_init(CURL_GLOBAL_DEFAULT);
-
-    // Пытаемся загрузить TEST_SUITE с URL (пример URL — поменяй под нужный)
     loadTestSuiteFromUrl(tests, "https://raw.githubusercontent.com/hyperion-cs/dpi-checkers/refs/heads/main/ru/tcp-16-20/index.html");
-
-    // Далее запускаем воркеры, используя либо дефолтные тесты, либо загруженные
 
     std::vector<std::thread> workers;
     for (const auto& t : tests) {
