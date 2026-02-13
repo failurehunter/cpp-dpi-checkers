@@ -110,12 +110,12 @@ static size_t curlWriteToString(void* contents, size_t size, size_t nmemb, void*
     return totalSize;
 }
 
-bool fetchHtml(const std::string& url, std::string& html) { 
+bool fetchJson(const std::string& url, std::string& json) { 
     CURL* curl = curl_easy_init(); 
     if (!curl) return false; 
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str()); 
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curlWriteToString); 
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &html); 
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &json); 
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L); 
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0"); 
     CURLcode res = curl_easy_perform(curl); 
@@ -130,52 +130,51 @@ static inline std::string trim(const std::string& s) {
 }
 
 
-std::string extractTestSuiteArray(const std::string& html) {
-    const std::string marker = "const TEST_SUITE";
-    auto pos = html.find(marker);
-    if (pos == std::string::npos) return {};
-
-    // найти первую '[' после маркера
-    pos = html.find('[', pos);
+std::string extractTestSuiteArray(const std::string& json) {
+    auto pos = json.find('[');
     if (pos == std::string::npos) return {};
 
     size_t depth = 0;
     size_t start = pos;
 
-    for (size_t i = pos; i < html.size(); ++i) {
-        if (html[i] == '[') depth++;
-        else if (html[i] == ']') {
+    for (size_t i = pos; i < json.size(); ++i) {
+        if (json[i] == '[') depth++;
+        else if (json[i] == ']') {
             depth--;
             if (depth == 0) {
-                return html.substr(start, i - start + 1);
+                return json.substr(start, i - start + 1);
             }
         }
     }
     return {};
+
+
 }
 
-bool parseObject(const std::string& objText, Test& t) {
-    auto getString = [&](const std::string& key) -> std::string {
-        std::string pat = key + ":";
-        size_t p = objText.find(pat);
-        if (p == std::string::npos) return "";
-        p = objText.find('"', p);
-        if (p == std::string::npos) return "";
-        size_t q = objText.find('"', p + 1);
-        if (q == std::string::npos) return "";
-        return objText.substr(p + 1, q - (p + 1));
-    };
 
-    auto getInt = [&](const std::string& key) -> int {
-        std::string pat = key + ":";
-        size_t p = objText.find(pat);
-        if (p == std::string::npos) return 0;
-        p += pat.size();
-        while (p < objText.size() && isspace(objText[p])) p++;
-        size_t q = p;
-        while (q < objText.size() && isdigit(objText[q])) q++;
-        return std::stoi(objText.substr(p, q - p));
-    };
+bool parseObject(const std::string& objText, Test& t) {
+auto getString = [&](const std::string& key) -> std::string {
+    std::string pat = "\"" + key + "\":";
+    size_t p = objText.find(pat);
+    if (p == std::string::npos) return "";
+    p = objText.find('"', p + pat.size());
+    if (p == std::string::npos) return "";
+    size_t q = objText.find('"', p + 1);
+    if (q == std::string::npos) return "";
+    return objText.substr(p + 1, q - (p + 1));
+};
+
+auto getInt = [&](const std::string& key) -> int {
+    std::string pat = "\"" + key + "\":";
+    size_t p = objText.find(pat);
+    if (p == std::string::npos) return 0;
+    p += pat.size();
+    while (p < objText.size() && isspace((unsigned char)objText[p])) p++;
+    size_t q = p;
+    while (q < objText.size() && isdigit((unsigned char)objText[q])) q++;
+    return std::stoi(objText.substr(p, q - p));
+};
+
 
     t.id       = getString("id");
     t.provider = getString("provider");
@@ -213,10 +212,10 @@ void parseTestSuiteVector(const std::string& arrayText, std::vector<Test>& out) 
 }
 
 void loadTestSuiteFromUrl(std::vector<Test>& tests, const std::string& url) {
-    std::string html;
-    if (!fetchHtml(url, html)) return;
+    std::string json;
+    if (!fetchJson(url, json)) return;
 
-    std::string arr = extractTestSuiteArray(html);
+    std::string arr = extractTestSuiteArray(json);
     if (arr.empty()) return;
 
     tests.clear();
@@ -348,6 +347,9 @@ if (argc > 1) {
 
     curl_global_init(CURL_GLOBAL_DEFAULT);
     loadTestSuiteFromUrl(tests, "https://raw.githubusercontent.com/hyperion-cs/dpi-checkers/refs/heads/main/ru/tcp-16-20/suite.json");
+    
+
+
 
     std::vector<std::thread> workers;
     for (const auto& t : tests) {
