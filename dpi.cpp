@@ -347,7 +347,7 @@ if (argc > 1) {
     }
 
     curl_global_init(CURL_GLOBAL_DEFAULT);
-    loadTestSuiteFromUrl(tests, "https://raw.githubusercontent.com/hyperion-cs/dpi-checkers/refs/heads/main/ru/tcp-16-20/index.html");
+    loadTestSuiteFromUrl(tests, "https://raw.githubusercontent.com/hyperion-cs/dpi-checkers/refs/heads/main/ru/tcp-16-20/suite.json");
 
     std::vector<std::thread> workers;
     for (const auto& t : tests) {
